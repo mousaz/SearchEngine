@@ -12,8 +12,10 @@ import org.mongodb.scala._
 import org.mongodb.scala.bson.codecs.Macros
 import org.mongodb.scala.model.Filters
 
+import java.nio.file.{FileSystems, Files}
 import scala.concurrent.Await
 import scala.concurrent.duration.DurationInt
+import scala.jdk.CollectionConverters.asScalaIteratorConverter
 import scala.util.control.Breaks.{break, breakable}
 
 object App {
@@ -23,6 +25,7 @@ object App {
 
   val DOCUMENTS_FOLDER = "data/documents"
   val INVERTED_INDEX_PATH = "data/inverted-index"
+  val BENCHMARK_DATA_FOLDER = "data/benchmark"
 
   def setup(
              spark: SparkSession,
@@ -147,21 +150,22 @@ object App {
     val invertedIndexRdd = setup(spark, termsCollection)
 //        val invertedIndexRdd = readInvertedIndexFile(INVERTED_INDEX_PATH, spark)
 
-    breakable {
-      while (true) {
-        print("Enter search query [$ to exit]: ")
-        val userQuery = scala.io.StdIn.readLine()
-        if (userQuery.equals("$")) break
-        val normalizedTerms = userQuery.split(" ").map(_.toLowerCase()).filter(_.length > 2)
-
-        val sparkResult = withTime(runQueryOnSpark(invertedIndexRdd, normalizedTerms))
-        val mongoResult = withTime(runQueryOnMongo(termsCollection, normalizedTerms))
-
-        printResults(sparkResult, "Spark")
-        printResults(mongoResult, "Mongo")
-        println()
-      }
-    }
+//    breakable {
+//      while (true) {
+//        print("Enter search query [$ to exit]: ")
+//        val userQuery = scala.io.StdIn.readLine()
+//        if (userQuery.equals("$")) break
+//        val normalizedTerms = userQuery.split(" ").map(_.toLowerCase()).filter(_.length > 2)
+//
+//        val sparkResult = withTime(runQueryOnSpark(invertedIndexRdd, normalizedTerms))
+//        val mongoResult = withTime(runQueryOnMongo(termsCollection, normalizedTerms))
+//
+//        printResults(sparkResult, "Spark")
+//        printResults(mongoResult, "Mongo")
+//        println()
+//      }
+//    }
+    runBenchMark(spark, invertedIndexRdd, termsCollection)
   }
 
   def withTime[T](action: => T): (T, Long) = {
@@ -185,5 +189,25 @@ object App {
     }
 
     println("--------------------------------------")
+  }
+
+  def runBenchMark(
+                    spark: SparkSession,
+                    invertedIndexRdd: RDD[(String, Int, Array[(String, Array[(Long, Long)])])],
+                    termsCollection: MongoCollection[Term]
+                  ): Unit = {
+    val dir = FileSystems.getDefault.getPath(BENCHMARK_DATA_FOLDER)
+    val files = Files.list(dir).iterator().asScala.filter(Files.isRegularFile(_))
+    files.foreach(file => {
+      val lines = spark.sparkContext.textFile(file.toString).collect()
+      println(file.getFileName)
+      println(s"Spark,Mongo")
+      lines.foreach(line => {
+        val normalizedTerms = line.split(" ")
+        val (_, sparkTime) = withTime(runQueryOnSpark(invertedIndexRdd, normalizedTerms))
+        val (_, mongoTime) = withTime(runQueryOnMongo(termsCollection, normalizedTerms))
+        println(s"$sparkTime,$mongoTime")
+      })
+    })
   }
 }

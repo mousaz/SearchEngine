@@ -7,7 +7,6 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.bson.codecs.configuration.CodecRegistries.{fromProviders, fromRegistries}
 import org.mongodb.scala.MongoClient.DEFAULT_CODEC_REGISTRY
-import org.mongodb.scala.bson.collection.immutable.Document
 import org.mongodb.scala.{MongoClient, MongoCollection, MongoDatabase}
 import org.mongodb.scala._
 import org.mongodb.scala.bson.codecs.Macros
@@ -18,34 +17,38 @@ import scala.concurrent.duration.DurationInt
 import scala.util.control.Breaks.{break, breakable}
 
 object App {
-  case class TermDocLocation(docName: String, locations: Seq[Long])
+  case class LocationPair(actual: Long, virtual: Long)
+  case class TermDocLocation(docName: String, locations: Seq[LocationPair])
   case class Term(text: String, freq: Int, locations: Seq[TermDocLocation])
+
+  val DOCUMENTS_FOLDER = "data/documents"
+  val INVERTED_INDEX_PATH = "data/inverted-index"
 
   def setup(
              spark: SparkSession,
              termsCollection:
-             MongoCollection[Term]): RDD[(String, Int, Array[(String, Array[Long])])] = {
+             MongoCollection[Term]): RDD[(String, Int, Array[(String, Array[(Long, Long)])])] = {
     // Generate the inverted index
     val invertedIndexRdd = generateIndex(
-      dataFilesFolderPath = "data/documents",
-      indexFilePath = "data/inverted-index",
+      dataFilesFolderPath = DOCUMENTS_FOLDER,
+      indexFilePath = INVERTED_INDEX_PATH,
       spark)
 
-    // Insert items to mongodb in chunks
-    invertedIndexRdd
-      .collect()
-      .foreach({
-        case (w, c, l) =>
-          val future = termsCollection.insertOne(
-            Term(w, c, l.map(i => TermDocLocation(i._1, i._2)))).toFuture()
-          Await.result(future, 10.seconds)
-      })
+    // Insert items to mongodb
+//    invertedIndexRdd
+//      .collect()
+//      .foreach({
+//        case (w, c, l) =>
+//          val future = termsCollection.insertOne(
+//            Term(w, c, l.map(i => TermDocLocation(i._1, i._2.map(p => LocationPair(p._1, p._2)))))).toFuture()
+//          Await.result(future, 10.seconds)
+//      })
 
     invertedIndexRdd
   }
 
   def runQueryOnSpark(
-                       invertedIndexRdd: RDD[(String, Int, Array[(String, Array[Long])])],
+                       invertedIndexRdd: RDD[(String, Int, Array[(String, Array[(Long, Long)])])],
                        terms: Array[String]): (Array[String], Array[(String, Array[Long])]) = {
 
     val matchedTerms = invertedIndexRdd
@@ -67,16 +70,16 @@ object App {
     val future = termsCollection.find(query).toFuture()
     val results = Await.result(future, 10.seconds)
     val resultsAsMap = results.map(d => {
-      (d.text, d.locations.map(l => (l.docName, l.locations.toArray)).toArray)
+      (d.text, d.locations.map(l => (l.docName, l.locations.map(l => (l.actual, l.virtual)).toArray)).toArray)
     }).toMap
     getMatchedPhrase(resultsAsMap, terms)
   }
 
   def getMatchedPhrase(
-                        singleMatches: Map[String, Array[(String, Array[Long])]],
+                        singleMatches: Map[String, Array[(String, Array[(Long, Long)])]],
                         terms: Array[String]): (Array[String], Array[(String, Array[Long])]) = {
 
-    var result: (Array[String], Array[(String, Array[Long])]) = (Array(), Array())
+    var result: (Array[String], Array[(String, Array[(Long, Long)])]) = (Array(), Array())
     terms.foreach(term => {
       if (singleMatches.contains(term)) {
         val docsForTerm = singleMatches(term)
@@ -84,14 +87,16 @@ object App {
         if (addedTerms.isEmpty && addedDocs.isEmpty) {
           result = (Array(term), docsForTerm)
         } else {
-          var multiTermDocs: Array[(String, Array[Long])] = Array()
+          var multiTermDocs: Array[(String, Array[(Long, Long)])] = Array()
           addedDocs.foreach {
             case (docName, locations) => {
               val foundDocs = docsForTerm.filter(d => d._1.equals(docName))
               if (!foundDocs.isEmpty) {
-                var foundLocations: Array[Long] = Array()
+                val foundDoc = foundDocs(0)
+                val docLocations = foundDoc._2.map(_._2)
+                var foundLocations: Array[(Long, Long)] = Array()
                 locations.foreach(l => {
-                  if (foundDocs(0)._2.contains(l + addedTerms.length)) {
+                  if (docLocations.contains(l._2 + addedTerms.length)) {
                     foundLocations = foundLocations:+ l
                   }
                 })
@@ -105,7 +110,7 @@ object App {
         }
       }
     })
-    result
+    (result._1, result._2.map(d => (d._1, d._2.map(_._1))))
   }
 
   def main(args: Array[String]): Unit = {
@@ -131,7 +136,8 @@ object App {
     val codecRegistry = fromRegistries(
       fromProviders(
         Macros.createCodecProvider[Term](),
-        Macros.createCodecProvider[TermDocLocation]()
+        Macros.createCodecProvider[TermDocLocation](),
+        Macros.createCodecProvider[LocationPair]()
       ),
       DEFAULT_CODEC_REGISTRY)
     val database: MongoDatabase = mongoClient.getDatabase("SearchEngine").withCodecRegistry(codecRegistry)
@@ -139,7 +145,7 @@ object App {
 
     // One time setup
     val invertedIndexRdd = setup(spark, termsCollection)
-    //    val invertedIndexRdd = readInvertedIndexFile("data/inverted-index", spark)
+//        val invertedIndexRdd = readInvertedIndexFile(INVERTED_INDEX_PATH, spark)
 
     breakable {
       while (true) {

@@ -17,7 +17,7 @@ object InvertedIndexManager {
   def generateIndex(
                      dataFilesFolderPath: String,
                      indexFilePath: String,
-                     spark: SparkSession): RDD[(String, Int, Array[(String, Array[Long])])] = {
+                     spark: SparkSession): RDD[(String, Int, Array[(String, Array[(Long, Long)])])] = {
     val dir = FileSystems.getDefault.getPath(dataFilesFolderPath)
     val files = Files.list(dir).iterator().asScala.filter(Files.isRegularFile(_))
     val invertedIndexFileRdd = files
@@ -27,11 +27,15 @@ object InvertedIndexManager {
         val fileName = file.getFileName.toString
         val df = spark.sparkContext.textFile(file.toString)
         df
-          .flatMap(_.split(" ")) // Get Words
-          .filter(_.length > 2)
+          .map(_.replaceAll("""[\p{Punct}\d]""", " ")) // remove punctuation
+          .flatMap(_.split(" ")) // split by space
+          .map(_.trim())
+          .zipWithIndex()
+          .filter(_._1.length > 2) // drop words less than 3 chars
           .zipWithIndex()
           .map {
-            case (word, index) => (word.toLowerCase, Array(index + 1))
+            case ((word, actualIndex), newIndex) =>
+              (word.toLowerCase, Array((actualIndex + 1, newIndex + 1)))
           }
           .reduceByKey(_ ++ _)
           .map {
@@ -49,12 +53,15 @@ object InvertedIndexManager {
 
 //    deleteDirectory(FileSystems.getDefault.getPath(indexFilePath))
 
-    // word,5,d1>1#2#3;d2>5#77
+    // word,5,d1>1'1#2'2#4'5;d2>5'4#77'70
     invertedIndexFileRdd
       .map {
         case (word, count, locations) => {
           val locationsStr = locations
-            .map(loc => s"${loc._1}>${loc._2.mkString("#")}")
+            .map(loc => {
+              val indicies = loc._2.map(i => s"${i._1}'${i._2}")
+              s"${loc._1}>${indicies.mkString("#")}"
+            })
             .mkString(";")
           s"$word,$count,$locationsStr"
         }
@@ -72,10 +79,10 @@ object InvertedIndexManager {
    */
   def readInvertedIndexFile(
                              filePath: String,
-                             spark: SparkSession): RDD[(String, Int, Array[(String, Array[Long])])] = {
+                             spark: SparkSession): RDD[(String, Int, Array[(String, Array[(Long, Long)])])] = {
     val rdd = spark.sparkContext.textFile(filePath)
 
-    // word,5,d1>1#2#3;d2>5#77
+    // word,5,d1>1'1#2'2#4'5;d2>5'4#77'70
     rdd.map {
       line => {
         val parts = line.split(",")
@@ -86,7 +93,11 @@ object InvertedIndexManager {
                 val docParts = doc.split(">")
                 docParts match {
                   case Array(docName, locations) =>
-                    (docName, locations.split("#").map(_.toLong))
+                    val locationPairs = locations.split("#").map(pairs => {
+                      val indexes = pairs.split("'")
+                      (indexes(0).toLong, indexes(1).toLong)
+                    })
+                    (docName, locationPairs)
                 }
               }
             }

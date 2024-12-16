@@ -66,7 +66,7 @@ object InvertedIndexManager {
           s"$word,$count,$locationsStr"
         }
       }
-//      .saveAsTextFile(indexFilePath)
+      .saveAsTextFile(indexFilePath)
 
     invertedIndexFileRdd
   }

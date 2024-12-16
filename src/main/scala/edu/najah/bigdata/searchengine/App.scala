@@ -31,23 +31,28 @@ object App {
              spark: SparkSession,
              termsCollection:
              MongoCollection[Term]): RDD[(String, Int, Array[(String, Array[(Long, Long)])])] = {
-    // Generate the inverted index
-    val invertedIndexRdd = generateIndex(
-      dataFilesFolderPath = DOCUMENTS_FOLDER,
-      indexFilePath = INVERTED_INDEX_PATH,
-      spark)
 
-    // Insert items to mongodb
-//    invertedIndexRdd
-//      .collect()
-//      .foreach({
-//        case (w, c, l) =>
-//          val future = termsCollection.insertOne(
-//            Term(w, c, l.map(i => TermDocLocation(i._1, i._2.map(p => LocationPair(p._1, p._2)))))).toFuture()
-//          Await.result(future, 10.seconds)
-//      })
+    if (!Files.exists(FileSystems.getDefault.getPath(INVERTED_INDEX_PATH))) {
+      // Generate the inverted index
+      val invertedIndexRdd = generateIndex(
+        dataFilesFolderPath = DOCUMENTS_FOLDER,
+        indexFilePath = INVERTED_INDEX_PATH,
+        spark)
 
-    invertedIndexRdd
+      // Insert items to mongodb
+      invertedIndexRdd
+        .collect()
+        .foreach({
+          case (w, c, l) =>
+            val future = termsCollection.insertOne(
+              Term(w, c, l.map(i => TermDocLocation(i._1, i._2.map(p => LocationPair(p._1, p._2)))))).toFuture()
+            Await.result(future, 10.seconds)
+        })
+
+      invertedIndexRdd
+    } else {
+      readInvertedIndexFile(INVERTED_INDEX_PATH, spark)
+    }
   }
 
   def runQueryOnSpark(
@@ -146,26 +151,26 @@ object App {
     val database: MongoDatabase = mongoClient.getDatabase("SearchEngine").withCodecRegistry(codecRegistry)
     val termsCollection: MongoCollection[Term] = database.getCollection("Terms")
 
-    // One time setup
+    // Gets the inverted index rdd
+    // If the file doesn't exit, it will generate it and add the terms to db
     val invertedIndexRdd = setup(spark, termsCollection)
-//        val invertedIndexRdd = readInvertedIndexFile(INVERTED_INDEX_PATH, spark)
 
-//    breakable {
-//      while (true) {
-//        print("Enter search query [$ to exit]: ")
-//        val userQuery = scala.io.StdIn.readLine()
-//        if (userQuery.equals("$")) break
-//        val normalizedTerms = userQuery.split(" ").map(_.toLowerCase()).filter(_.length > 2)
-//
-//        val sparkResult = withTime(runQueryOnSpark(invertedIndexRdd, normalizedTerms))
-//        val mongoResult = withTime(runQueryOnMongo(termsCollection, normalizedTerms))
-//
-//        printResults(sparkResult, "Spark")
-//        printResults(mongoResult, "Mongo")
-//        println()
-//      }
-//    }
-    runBenchMark(spark, invertedIndexRdd, termsCollection)
+    breakable {
+      while (true) {
+        print("Enter search query [$ to exit]: ")
+        val userQuery = scala.io.StdIn.readLine()
+        if (userQuery.equals("$")) break
+        val normalizedTerms = userQuery.split(" ").map(_.toLowerCase()).filter(_.length > 2)
+
+        val sparkResult = withTime(runQueryOnSpark(invertedIndexRdd, normalizedTerms))
+        val mongoResult = withTime(runQueryOnMongo(termsCollection, normalizedTerms))
+
+        printResults(sparkResult, "Spark")
+        printResults(mongoResult, "Mongo")
+        println()
+      }
+    }
+//    runBenchMark(spark, invertedIndexRdd, termsCollection)
   }
 
   def withTime[T](action: => T): (T, Long) = {
